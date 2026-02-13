@@ -61,11 +61,25 @@ def chat_with_llama():
                 'content': response_content
             })
             
-        except Exception as e:
-            print(f"\nError: {e}")
-            print("Make sure Ollama is installed and the llama3.3:70b model is available.")
-            print("You can install the model with: ollama pull llama3.3:70b")
-            sys.exit(1)
+        except ollama.ResponseError as e:
+            print(f"\nError from Ollama: {e}")
+            if "model" in str(e).lower():
+                print("Make sure the llama3.3:70b model is available.")
+                print("You can install it with: ollama pull llama3.3:70b")
+                sys.exit(1)
+            else:
+                print("Please try again.")
+                # Remove the last user message since we couldn't get a response
+                conversation_history.pop()
+        except ConnectionError as e:
+            print(f"\nConnection error: {e}")
+            print("Make sure Ollama service is running.")
+            print("Please try again.")
+            # Remove the last user message since we couldn't get a response
+            conversation_history.pop()
+        except KeyboardInterrupt:
+            print("\n\nGoodbye! Thanks for chatting.")
+            break
 
 
 if __name__ == "__main__":
