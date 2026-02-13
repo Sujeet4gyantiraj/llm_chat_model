@@ -71,7 +71,7 @@ def chat_with_llama():
                 print("Please try again.")
                 # Remove the last user message since we couldn't get a response
                 conversation_history.pop()
-        except ConnectionError as e:
+        except ollama.RequestError as e:
             print(f"\nConnection error: {e}")
             print("Make sure Ollama service is running.")
             print("Please try again.")
