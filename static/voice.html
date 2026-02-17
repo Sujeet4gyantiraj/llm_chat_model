@@ -210,6 +210,49 @@
 </form>
 
 <script>
+// ── Browser Compatibility Check ────────────────────────────────────────────
+(function checkBrowserCompatibility() {
+  const issues = [];
+  
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    issues.push("MediaDevices API not supported");
+  }
+  
+  if (typeof MediaRecorder === "undefined") {
+    issues.push("MediaRecorder API not supported");
+  }
+  
+  if (typeof WebSocket === "undefined") {
+    issues.push("WebSocket not supported");
+  }
+  
+  if (!window.AudioContext && !window.webkitAudioContext) {
+    issues.push("Web Audio API not supported");
+  }
+  
+  // Check secure context for getUserMedia
+  if (location.protocol !== "https:" && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
+    issues.push("⚠️ HTTPS required for microphone access (or use localhost)");
+  }
+  
+  if (issues.length > 0) {
+    console.error("Browser compatibility issues:", issues);
+    const msg = "Your browser doesn't support voice chat. Issues: " + issues.join(", ");
+    setTimeout(() => {
+      const chatEl = document.getElementById("chat");
+      if (chatEl) {
+        const div = document.createElement("div");
+        div.className = "msg system";
+        div.innerHTML = `❌ <strong>Browser Compatibility Error:</strong><br>${issues.join("<br>")}`;
+        chatEl.appendChild(div);
+      }
+      document.getElementById("status").textContent = "Browser not supported";
+    }, 100);
+  } else {
+    console.log("✓ Browser compatibility check passed");
+  }
+})();
+
 // ── State ──────────────────────────────────────────────────────────────────
 const WS_URL = `ws://${location.host}/ws/voice`;
 let ws = null;
@@ -279,11 +322,29 @@ async function ensureMediaStream() {
   if (mediaStream && mediaStream.active && hasLiveTrack) {
     return mediaStream;
   }
-  mediaStream = await navigator.mediaDevices.getUserMedia(MEDIA_CONSTRAINTS);
-  sourceNode = null;
-  analyser = null;
-  dataArray = null;
-  return mediaStream;
+  
+  try {
+    console.log("Requesting microphone access...");
+    mediaStream = await navigator.mediaDevices.getUserMedia(MEDIA_CONSTRAINTS);
+    console.log("✓ Microphone access granted", mediaStream);
+    sourceNode = null;
+    analyser = null;
+    dataArray = null;
+    return mediaStream;
+  } catch (err) {
+    console.error("✗ Microphone access error:", err);
+    if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+      throw new Error("Microphone permission denied. Please allow microphone access in your browser settings.");
+    } else if (err.name === "NotFoundError") {
+      throw new Error("No microphone found. Please connect a microphone and try again.");
+    } else if (err.name === "NotSupportedError") {
+      throw new Error("Microphone not supported on this device/browser.");
+    } else if (err.name === "NotReadableError") {
+      throw new Error("Microphone is being used by another application.");
+    } else {
+      throw new Error(`Microphone error: ${err.message || err.name}`);
+    }
+  }
 }
 
 function ensureAnalyser() {
@@ -316,11 +377,16 @@ function teardownMedia() {
 
 // ── WebSocket ──────────────────────────────────────────────────────────────
 function connectWS() {
+  console.log(`Connecting to WebSocket: ${WS_URL}`);
   ws = new WebSocket(WS_URL);
   ws.binaryType = "arraybuffer";
 
-  ws.onopen  = () => setStatus("Connected");
+  ws.onopen  = () => {
+    console.log("✓ WebSocket connected");
+    setStatus("Connected");
+  };
   ws.onclose = () => {
+    console.log("✗ WebSocket closed");
     setStatus("Disconnected — reconnecting…");
     autoMode = false;
     pausedByBot = false;
@@ -335,7 +401,11 @@ function connectWS() {
     updateMicButton();
     setTimeout(connectWS, 2000);
   };
-  ws.onerror = () => ws.close();
+  ws.onerror = (err) => {
+    console.error("✗ WebSocket error:", err);
+    addMessage("system", "⚠️ Connection error. Retrying...");
+    ws.close();
+  };
 
   ws.onmessage = (evt) => {
     if (evt.data instanceof ArrayBuffer) {
@@ -398,7 +468,37 @@ async function startRecording() {
     await ensureMediaStream();
     ensureAnalyser();
   } catch (err) {
-    addMessage("system", "Microphone access denied.");
+    console.error("Failed to start recording:", err);
+    addMessage("system", `❌ ${err.message}`);
+    autoMode = false;
+    startBtn.disabled = false;
+    startBtn.textContent = "Start Bot";
+    updateMicButton();
+    setStatus(err.message);
+    return;
+  }
+
+  // Check MediaRecorder support
+  const mimeTypes = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus"
+  ];
+  
+  let selectedMimeType = null;
+  for (const mimeType of mimeTypes) {
+    if (MediaRecorder.isTypeSupported(mimeType)) {
+      selectedMimeType = mimeType;
+      console.log(`✓ Using MIME type: ${mimeType}`);
+      break;
+    }
+  }
+  
+  if (!selectedMimeType) {
+    const errMsg = "Browser doesn't support audio recording. Try Chrome, Firefox, or Edge.";
+    console.error("✗ No supported MIME types found");
+    addMessage("system", `❌ ${errMsg}`);
+    setStatus(errMsg);
     autoMode = false;
     startBtn.disabled = false;
     startBtn.textContent = "Start Bot";
@@ -419,31 +519,47 @@ async function startRecording() {
   }
   drawVisualiser();
 
-  const currentRecorder = new MediaRecorder(mediaStream, { mimeType: "audio/webm;codecs=opus" });
-  recorder = currentRecorder;
-  currentRecorder.ondataavailable = (e) => {
+  try {
+    const currentRecorder = new MediaRecorder(mediaStream, { mimeType: selectedMimeType });
+    recorder = currentRecorder;
+    console.log("✓ MediaRecorder started with:", selectedMimeType);
+  } catch (err) {
+    console.error("✗ MediaRecorder creation failed:", err);
+    addMessage("system", `❌ Recording failed: ${err.message}`);
+    recording = false;
+    updateMicButton();
+    return;
+  }
+  
+  recorder.ondataavailable = (e) => {
     if (e.data.size > 0) {
       recordedChunks.push(e.data);
+      console.log(`Audio chunk received: ${e.data.size} bytes`);
     }
   };
-  currentRecorder.addEventListener("stop", async () => {
+  recorder.addEventListener("stop", async () => {
     try {
       let sentAudio = false;
       if (!discardClip && recordedChunks.length && ws?.readyState === WebSocket.OPEN) {
-        const blob = new Blob(recordedChunks, { type: currentRecorder.mimeType || "audio/webm;codecs=opus" });
+        const blob = new Blob(recordedChunks, { type: recorder.mimeType || "audio/webm;codecs=opus" });
         const buffer = await blob.arrayBuffer();
+        console.log(`Sending audio: ${buffer.byteLength} bytes, type: ${blob.type}`);
         ws.send(buffer);
         sentAudio = true;
       } else if (!discardClip && !autoMode) {
-        addMessage("system", "No audio captured. Please try again.");
+        const msg = recordedChunks.length === 0 ? "No audio captured." : "WebSocket not connected.";
+        console.warn(`✗ Cannot send audio: ${msg}`);
+        addMessage("system", `⚠️ ${msg} Please try again.`);
       }
 
       if (sentAudio && ws?.readyState === WebSocket.OPEN) {
+        console.log("Sending end signal");
         ws.send(JSON.stringify(buildControlPayload()));
       }
     } catch (err) {
+      console.error("✗ Audio processing error:", err);
       if (!discardClip) {
-        addMessage("system", `Failed to process audio: ${err.message}`);
+        addMessage("system", `❌ Failed to process audio: ${err.message}`);
       }
     } finally {
       recordedChunks = [];
@@ -547,9 +663,11 @@ textForm.addEventListener("submit", (evt) => {
 startBtn.addEventListener("click", async () => {
   if (ws?.readyState !== WebSocket.OPEN) {
     setStatus("Connecting… please wait");
+    addMessage("system", "⚠️ Waiting for connection...");
     return;
   }
 
+  console.log("Start Bot clicked");
   setStatus("Starting conversation...");
   ws.send(JSON.stringify({ action: "start" }));
   autoMode = true;
@@ -558,7 +676,15 @@ startBtn.addEventListener("click", async () => {
   startBtn.textContent = "Bot Running";
 
   if (!pausedByBot && !recording) {
-    await startRecording();
+    try {
+      await startRecording();
+    } catch (err) {
+      console.error("Failed to start recording after Start Bot:", err);
+      autoMode = false;
+      startBtn.disabled = false;
+      startBtn.textContent = "Start Bot";
+      updateMicButton();
+    }
   }
 });
 
@@ -579,6 +705,27 @@ micBtn.addEventListener("touchend", toggleRecording);
 updateMicButton();
 
 // ── Boot ───────────────────────────────────────────────────────────────────
+console.log("=== Voice Chat Initializing ===");
+console.log("WebSocket URL:", WS_URL);
+console.log("Page protocol:", location.protocol);
+console.log("Hostname:", location.hostname);
+
+// Test microphone support
+if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+  console.log("✓ getUserMedia is supported");
+  navigator.mediaDevices.enumerateDevices()
+    .then(devices => {
+      const audioInputs = devices.filter(d => d.kind === "audioinput");
+      console.log(`Found ${audioInputs.length} audio input device(s):`, audioInputs.map(d => d.label || d.deviceId));
+      if (audioInputs.length === 0) {
+        addMessage("system", "⚠️ No microphone detected. Please connect a microphone.");
+      }
+    })
+    .catch(err => console.warn("Could not enumerate devices:", err));
+} else {
+  console.error("✗ getUserMedia not supported");
+}
+
 connectWS();
 </script>
 </body>
